@@ -9,6 +9,10 @@ import 'package:uuid/uuid.dart';
 import '../data/database_helper.dart';
 import '../services/notification_service.dart';
 import 'settings_screen.dart';
+import 'tasks_screen.dart';
+
+
+import 'stats_screen.dart';
 
 enum FasePomodoro { trabajo, descanso }
 
@@ -24,8 +28,12 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
   int _duracionTrabajo = 25 * 60;
   int _duracionDescanso = 5 * 60;
 
-  /// Tarea provisional hasta que exista la selección de tareas en la UI.
-  static const String _tareaProvisionalId = 'tarea-provisional';
+  /// Tareas pendientes disponibles en el Dropdown y la elegida.
+  List<Map<String, dynamic>> _tareas = [];
+  String? _tareaSeleccionadaId;
+
+  /// Tarea fijada al iniciar la sesión de trabajo en curso.
+  String? _tareaSesionId;
 
   Timer? _timer;
   FasePomodoro _fase = FasePomodoro.trabajo;
@@ -55,6 +63,28 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     NotificationService.instance.init();
     _cargarTiempos();
+    _cargarTareas();
+  }
+
+  /// Carga las tareas pendientes para el Dropdown.
+  Future<void> _cargarTareas() async {
+    final todas = await DatabaseHelper.instance.listarTareas();
+    final tareas = todas.where((t) => t['completada'] == 0).toList();
+    if (!mounted) return;
+    setState(() {
+      _tareas = tareas;
+      if (!tareas.any((t) => t['id'] == _tareaSeleccionadaId)) {
+        _tareaSeleccionadaId = null;
+      }
+    });
+  }
+
+  Future<void> _abrirTareas() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const TasksScreen()),
+    );
+    await _cargarTareas();
   }
 
   @override
@@ -126,11 +156,19 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
   // ------------------------------------------------------------ Controles
   void _iniciar() {
     if (_corriendo) return;
+    final nuevaSesion = _fase == FasePomodoro.trabajo &&
+        _segundosRestantes == _duracionTrabajo;
+    if (_fase == FasePomodoro.trabajo && _tareaSeleccionadaId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Selecciona una tarea antes de iniciar'),
+      ));
+      return;
+    }
     _inicio = DateTime.now();
     _segundosAlIniciar = _segundosRestantes;
-    if (_fase == FasePomodoro.trabajo &&
-        _segundosRestantes == _duracionTrabajo) {
+    if (nuevaSesion) {
       _inicioSesionTrabajo = _inicio;
+      _tareaSesionId = _tareaSeleccionadaId;
     }
     _timer = Timer.periodic(
       const Duration(seconds: 1),
@@ -217,19 +255,15 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
   /// fija ([_tareaProvisionalId]) que se crea si aún no existe.
   Future<void> _guardarSesionLocal() async {
     final inicio = _inicioSesionTrabajo;
-    if (inicio == null) return;
+    final tareaId = _tareaSesionId;
+    _inicioSesionTrabajo = null;
+    if (inicio == null || tareaId == null) return;
 
     try {
       final db = DatabaseHelper.instance;
-      await db.insertarTarea({
-        'id': _tareaProvisionalId,
-        'titulo': 'Sin tarea asignada',
-        'completada': 0,
-        'pomodoros_estimados': 1,
-      });
       await db.insertarSesion({
         'id': const Uuid().v4(),
-        'tarea_id': _tareaProvisionalId,
+        'tarea_id': tareaId,
         'fecha_inicio': inicio.toUtc().toIso8601String(),
         'duracion_minutos': _duracionTrabajo ~/ 60,
         'estado': 'completada',
@@ -265,6 +299,19 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
         centerTitle: true,
         actions: [
           IconButton(
+            icon: const Icon(Icons.checklist),
+            tooltip: 'Tareas',
+            onPressed: _abrirTareas,
+          ),
+          IconButton(
+            icon: const Icon(Icons.bar_chart),
+            tooltip: 'Estadísticas',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const StatsScreen()),
+            ),
+          ),
+          IconButton(
             icon: const Icon(Icons.settings),
             tooltip: 'Configuración',
             onPressed: _abrirConfiguracion,
@@ -278,6 +325,31 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              DropdownButtonFormField<String>(
+                key: ValueKey('dd_${_tareaSeleccionadaId}_${_tareas.length}'),
+                initialValue: _tareaSeleccionadaId,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: 'Tarea en la que trabajarás',
+                  border: OutlineInputBorder(),
+                ),
+                hint: Text(_tareas.isEmpty
+                    ? 'Crea una tarea en el menú Tareas'
+                    : 'Selecciona una tarea'),
+                items: [
+                  for (final t in _tareas)
+                    DropdownMenuItem(
+                      value: t['id'] as String,
+                      child: Text(t['titulo'] as String,
+                          overflow: TextOverflow.ellipsis),
+                    ),
+                ],
+                // Bloqueado mientras el reloj corre o hay una sesión a medias.
+                onChanged: (_corriendo || _inicioSesionTrabajo != null)
+                    ? null
+                    : (v) => setState(() => _tareaSeleccionadaId = v),
+              ),
+              const SizedBox(height: 24),
               Chip(
                 label: Text(esTrabajo ? 'Trabajo' : 'Descanso'),
                 avatar: Icon(esTrabajo ? Icons.work : Icons.coffee,

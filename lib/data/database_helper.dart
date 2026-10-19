@@ -111,6 +111,12 @@ class DatabaseHelper {
     );
   }
 
+  Future<int> eliminarTarea(String id) async {
+    if (!soportado) return 0;
+    final db = await database;
+    return db.delete(tablaTareas, where: 'id = ?', whereArgs: [id]);
+  }
+
   // -------------------------------------------------------------- SESIONES
   Future<int> insertarSesion(Map<String, dynamic> sesion) async {
     if (!soportado) return 0;

@@ -25,15 +25,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.dispose();
   }
 
-  String? _validar(String? valor) {
-    if (valor == null || valor.trim().isEmpty) {
-      return 'Este campo es obligatorio';
-    }
-    if ((int.tryParse(valor.trim()) ?? 0) <= 0) {
-      return 'Debe ser mayor a 0';
-    }
+ // String? _validar(String? valor) {
+  //  if (valor == null || valor.trim().isEmpty) {
+  //    return 'Este campo es obligatorio';
+ //   }
+ //   if ((int.tryParse(valor.trim()) ?? 0) <= 0) {
+ //     return 'Debe ser mayor a 0';
+ //   }
+ //   return null;
+ // }
+
+ String? _validarTrabajo(String? valor) {
+    if (valor == null || valor.trim().isEmpty) return 'Requerido';
+    final min = int.tryParse(valor.trim()) ?? 0;
+    if (min < 15 || min > 60) return 'Debe ser entre 15 y 60 min';
     return null;
   }
+
+  String? _validarDescanso(String? valor) {
+    if (valor == null || valor.trim().isEmpty) return 'Requerido';
+    final min = int.tryParse(valor.trim()) ?? 0;
+    // Unificamos el rango: cubre desde el mínimo del corto (3) hasta el máximo del largo (30)
+    if (min < 3 || min > 30) return 'Debe ser entre 3 y 30 min';
+    return null;
+  }
+
+//
 
   Future<void> _guardar() async {
     if (!_formKey.currentState!.validate()) return;
@@ -85,7 +102,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     labelText: 'Minutos de Trabajo',
                     border: OutlineInputBorder(),
                   ),
-                  validator: _validar,
+                  //validator: _validar,
+                  validator: _validarTrabajo,
                 ),
                 const SizedBox(height: 16),
                 TextFormField(
@@ -96,7 +114,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     labelText: 'Minutos de Descanso',
                     border: OutlineInputBorder(),
                   ),
-                  validator: _validar,
+                  //validator: _validar,
+                  validator: _validarDescanso, 
                 ),
                 const Spacer(),
                 ElevatedButton(
