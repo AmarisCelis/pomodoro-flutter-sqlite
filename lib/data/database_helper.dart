@@ -6,16 +6,14 @@ import 'package:sqflite/sqflite.dart';
 import 'sqlite_init_web.dart'
     if (dart.library.io) 'sqlite_init_io.dart';
 
-/// Core local offline-first (SQLite) – patrón Singleton.
+/// Almacenamiento local (SQLite) – patrón Singleton.
 class DatabaseHelper {
   static const String _dbName = 'pomodoro.db';
+  // Se mantiene en 2 para que las instalaciones que ya abrieron esa versión sigan funcionando.
   static const int _dbVersion = 2;
 
   static const String tablaTareas = 'tareas';
   static const String tablaSesiones = 'sesiones';
-
-  /// Tareas borradas en el teléfono que aún no llegaron al servidor.
-  static const String tablaEliminadas = 'tareas_eliminadas';
 
   DatabaseHelper._internal();
   static final DatabaseHelper instance = DatabaseHelper._internal();
@@ -53,7 +51,6 @@ class DatabaseHelper {
         await db.rawQuery('PRAGMA journal_mode = WAL');
       },
       onCreate: _onCreate,
-      onUpgrade: _onUpgrade,
     );
   }
 
@@ -83,21 +80,6 @@ class DatabaseHelper {
 
     await db.execute(
         'CREATE INDEX idx_sesiones_tarea ON $tablaSesiones (tarea_id)');
-    await _crearTablaEliminadas(db);
-  }
-
-  /// Versión 2: se agrega la tabla de borrados pendientes de sincronizar.
-  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    if (oldVersion < 2) await _crearTablaEliminadas(db);
-  }
-
-  Future<void> _crearTablaEliminadas(Database db) async {
-    await db.execute('''
-      CREATE TABLE IF NOT EXISTS $tablaEliminadas (
-        id TEXT PRIMARY KEY NOT NULL,
-        eliminada_en TEXT NOT NULL
-      )
-    ''');
   }
 
   String _now() => DateTime.now().toUtc().toIso8601String();
@@ -130,19 +112,10 @@ class DatabaseHelper {
     );
   }
 
-  /// Borra la tarea (y sus sesiones, por cascada) y deja constancia del borrado
-  /// para enviarlo en la siguiente sincronización.
   Future<int> eliminarTarea(String id) async {
     if (!soportado) return 0;
     final db = await database;
-    return db.transaction<int>((txn) async {
-      await txn.insert(
-        tablaEliminadas,
-        {'id': id, 'eliminada_en': _now()},
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-      return txn.delete(tablaTareas, where: 'id = ?', whereArgs: [id]);
-    });
+    return db.delete(tablaTareas, where: 'id = ?', whereArgs: [id]);
   }
 
   // -------------------------------------------------------------- SESIONES
@@ -185,33 +158,6 @@ class DatabaseHelper {
       ORDER BY s.fecha_inicio DESC
     ''');
   }
-
-  /// Ids de las tareas borradas que aún no llegaron al servidor.
-  Future<List<String>> listarEliminadas() async {
-    if (!soportado) return [];
-    final db = await database;
-    final filas = await db.query(tablaEliminadas, columns: ['id']);
-    return filas.map((fila) => fila['id'] as String).toList();
-  }
-
-  /// Quita los borrados que el servidor ya confirmó.
-  Future<void> limpiarEliminadas(List<String> ids) async {
-    if (!soportado || ids.isEmpty) return;
-    final db = await database;
-    final marcas = List.filled(ids.length, '?').join(',');
-    await db.delete(
-      tablaEliminadas,
-      where: 'id IN ($marcas)',
-      whereArgs: ids,
-    );
-  }
-
-  /// Payload listo para POST /api/sync.
-  Future<Map<String, dynamic>> exportarParaSync() async => {
-        'tasks': await listarTareas(),
-        'sessions': await listarSesiones(),
-        'tareas_eliminadas': await listarEliminadas(),
-      };
 
   Future<void> close() async {
     await _database?.close();

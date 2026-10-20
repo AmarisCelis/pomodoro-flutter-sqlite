@@ -11,7 +11,6 @@ import '../services/notification_service.dart';
 import 'graficas_screen.dart';
 import 'settings_screen.dart';
 import 'stats_screen.dart';
-import 'sync_screen.dart';
 import 'tasks_screen.dart';
 
 /// Pantalla del temporizador. La lógica de fases vive en CicloPomodoro.
@@ -242,11 +241,6 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
             icon: const Icon(Icons.show_chart),
             tooltip: 'Gráficas',
             onPressed: () => _abrir(const GraficasScreen()),
-          ),
-          IconButton(
-            icon: const Icon(Icons.cloud_sync),
-            tooltip: 'Sincronización',
-            onPressed: () => _abrir(const SyncScreen()),
           ),
           IconButton(
             icon: const Icon(Icons.settings),
