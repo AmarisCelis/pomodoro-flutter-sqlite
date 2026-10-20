@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// Decisión del usuario cuando los tiempos salen del rango recomendado.
+enum _Decision { cancelar, ajustar, continuar }
+
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -35,27 +38,82 @@ class _SettingsScreenState extends State<SettingsScreen> {
  //   return null;
  // }
 
- String? _validarTrabajo(String? valor) {
+  /// Rango recomendado de un Pomodoro (minutos). Fuera de él se pide confirmación.
+  static const int minTrabajoRecomendado = 15;
+  static const int maxTrabajoRecomendado = 60;
+  static const int minDescansoRecomendado = 3;
+  static const int maxDescansoRecomendado = 30;
+
+  /// Límites absolutos: evitan valores como 0 o 999 que no tienen sentido.
+  static const int minAbsoluto = 1;
+  static const int maxAbsoluto = 120;
+
+  String? _validarMinutos(String? valor) {
     if (valor == null || valor.trim().isEmpty) return 'Requerido';
     final min = int.tryParse(valor.trim()) ?? 0;
-    if (min < 15 || min > 60) return 'Debe ser entre 15 y 60 min';
+    if (min < minAbsoluto || min > maxAbsoluto) {
+      return 'Debe ser entre $minAbsoluto y $maxAbsoluto min';
+    }
     return null;
   }
 
-  String? _validarDescanso(String? valor) {
-    if (valor == null || valor.trim().isEmpty) return 'Requerido';
-    final min = int.tryParse(valor.trim()) ?? 0;
-    // Unificamos el rango: cubre desde el mínimo del corto (3) hasta el máximo del largo (30)
-    if (min < 3 || min > 30) return 'Debe ser entre 3 y 30 min';
-    return null;
+  bool _fueraDeRango(int valor, int min, int max) => valor < min || valor > max;
+
+  int _ajustar(int valor, int min, int max) =>
+      valor < min ? min : (valor > max ? max : valor);
+
+  /// Muestra el aviso de tiempos fuera de lo recomendado y devuelve la decisión.
+  Future<_Decision?> _confirmarFueraDeRango(int trabajo, int descanso) {
+    final detalle = <String>[
+      if (_fueraDeRango(trabajo, minTrabajoRecomendado, maxTrabajoRecomendado))
+        'Trabajo: $trabajo min (recomendado de $minTrabajoRecomendado a $maxTrabajoRecomendado)',
+      if (_fueraDeRango(descanso, minDescansoRecomendado, maxDescansoRecomendado))
+        'Descanso: $descanso min (recomendado de $minDescansoRecomendado a $maxDescansoRecomendado)',
+    ];
+    return showDialog<_Decision>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Fuera del rango recomendado'),
+        content: Text(
+          '${detalle.join('\n')}\n\n'
+          '¿Quieres continuar con estos tiempos o usar el rango recomendado?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, _Decision.cancelar),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, _Decision.ajustar),
+            child: const Text('Usar rango recomendado'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, _Decision.continuar),
+            child: const Text('Continuar de todos modos'),
+          ),
+        ],
+      ),
+    );
   }
 
 //
 
   Future<void> _guardar() async {
     if (!_formKey.currentState!.validate()) return;
-    final trabajo = int.parse(_trabajoCtrl.text.trim());
-    final descanso = int.parse(_descansoCtrl.text.trim());
+    var trabajo = int.parse(_trabajoCtrl.text.trim());
+    var descanso = int.parse(_descansoCtrl.text.trim());
+
+    final fueraDeRango =
+        _fueraDeRango(trabajo, minTrabajoRecomendado, maxTrabajoRecomendado) ||
+            _fueraDeRango(descanso, minDescansoRecomendado, maxDescansoRecomendado);
+    if (fueraDeRango) {
+      final decision = await _confirmarFueraDeRango(trabajo, descanso);
+      if (decision == null || decision == _Decision.cancelar) return;
+      if (decision == _Decision.ajustar) {
+        trabajo = _ajustar(trabajo, minTrabajoRecomendado, maxTrabajoRecomendado);
+        descanso = _ajustar(descanso, minDescansoRecomendado, maxDescansoRecomendado);
+      }
+    }
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(SettingsScreen.claveTrabajo, trabajo);
@@ -100,10 +158,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                   decoration: const InputDecoration(
                     labelText: 'Minutos de Trabajo',
+                    helperText: 'Recomendado: 15 a 60 min',
                     border: OutlineInputBorder(),
                   ),
-                  //validator: _validar,
-                  validator: _validarTrabajo,
+                  validator: _validarMinutos,
                 ),
                 const SizedBox(height: 16),
                 TextFormField(
@@ -112,10 +170,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                   decoration: const InputDecoration(
                     labelText: 'Minutos de Descanso',
+                    helperText: 'Recomendado: 3 a 30 min',
                     border: OutlineInputBorder(),
                   ),
-                  //validator: _validar,
-                  validator: _validarDescanso, 
+                  validator: _validarMinutos,
                 ),
                 const Spacer(),
                 ElevatedButton(
