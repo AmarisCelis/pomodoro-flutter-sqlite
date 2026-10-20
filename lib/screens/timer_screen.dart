@@ -2,20 +2,19 @@ import 'dart:async';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
-
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../data/database_helper.dart';
+import '../services/ciclo_pomodoro.dart';
 import '../services/notification_service.dart';
+import 'graficas_screen.dart';
 import 'settings_screen.dart';
+import 'stats_screen.dart';
+import 'sync_screen.dart';
 import 'tasks_screen.dart';
 
-
-import 'stats_screen.dart';
-
-enum FasePomodoro { trabajo, descanso }
-
+/// Pantalla del temporizador. La lógica de fases vive en CicloPomodoro.
 class TimerScreen extends StatefulWidget {
   const TimerScreen({super.key});
 
@@ -24,38 +23,19 @@ class TimerScreen extends StatefulWidget {
 }
 
 class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
-  // Duraciones en segundos; se cargan desde SharedPreferences (ver _cargarTiempos).
-  int _duracionTrabajo = 25 * 60;
-  int _duracionDescanso = 5 * 60;
+  final CicloPomodoro _ciclo = CicloPomodoro();
 
   /// Tareas pendientes disponibles en el Dropdown y la elegida.
   List<Map<String, dynamic>> _tareas = [];
   String? _tareaSeleccionadaId;
 
-  /// Tarea fijada al iniciar la sesión de trabajo en curso.
-  String? _tareaSesionId;
-
+  /// Dispara la actualización de la pantalla cada segundo mientras corre el reloj.
   Timer? _timer;
-  FasePomodoro _fase = FasePomodoro.trabajo;
 
-  /// Segundos restantes que se muestran en pantalla.
-  int _segundosRestantes = 25 * 60;
-
-  /// Momento real en que se (re)inició el reloj.
-  DateTime? _inicio;
-
-  /// Segundos restantes que había justo cuando se guardó [_inicio].
-  int _segundosAlIniciar = 25 * 60;
-
-  /// Inicio de la sesión de trabajo actual (para guardarla en SQLite).
-  DateTime? _inicioSesionTrabajo;
-
-  /// Reproductor del beep de fin de fase (sonido forzado desde la app).
+  /// Reproductor del beep de fin de fase.
   final AudioPlayer _audioPlayer = AudioPlayer();
 
-  bool get _corriendo => _timer?.isActive ?? false;
-  int get _duracionFase =>
-      _fase == FasePomodoro.trabajo ? _duracionTrabajo : _duracionDescanso;
+  bool get _corriendo => _ciclo.corriendo;
 
   @override
   void initState() {
@@ -66,14 +46,28 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
     _cargarTareas();
   }
 
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _timer?.cancel();
+    _audioPlayer.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // El Timer pudo congelarse en segundo plano: se recalcula con el reloj real.
+    if (state == AppLifecycleState.resumed && _corriendo) _sincronizar();
+  }
+
   /// Carga las tareas pendientes para el Dropdown.
   Future<void> _cargarTareas() async {
     final todas = await DatabaseHelper.instance.listarTareas();
-    final tareas = todas.where((t) => t['completada'] == 0).toList();
+    final pendientes = todas.where((t) => t['completada'] == 0).toList();
     if (!mounted) return;
     setState(() {
-      _tareas = tareas;
-      if (!tareas.any((t) => t['id'] == _tareaSeleccionadaId)) {
+      _tareas = pendientes;
+      if (!pendientes.any((t) => t['id'] == _tareaSeleccionadaId)) {
         _tareaSeleccionadaId = null;
       }
     });
@@ -87,34 +81,16 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
     await _cargarTareas();
   }
 
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _timer?.cancel();
-    _audioPlayer.dispose();
-    super.dispose();
-  }
-
-  /// Lee los minutos guardados (o usa 25/5 por defecto) y deja el reloj en
-  /// la fase de trabajo con la nueva duración.
+  /// Lee los minutos guardados (o usa 25/5 por defecto).
   Future<void> _cargarTiempos() async {
     final prefs = await SharedPreferences.getInstance();
     final trabajo = prefs.getInt(SettingsScreen.claveTrabajo) ?? 25;
     final descanso = prefs.getInt(SettingsScreen.claveDescanso) ?? 5;
     if (!mounted) return;
-    setState(() {
-      _duracionTrabajo = trabajo * 60;
-      _duracionDescanso = descanso * 60;
-      if (!_corriendo) {
-        _fase = FasePomodoro.trabajo;
-        _segundosRestantes = _duracionTrabajo;
-        _segundosAlIniciar = _duracionTrabajo;
-      }
-    });
+    setState(() => _ciclo.aplicarTiempos(trabajo, descanso));
   }
 
-  /// Abre Configuración; si se guardaron cambios (true), recarga los tiempos,
-  /// actualiza la UI y reinicia el reloj con las nuevas duraciones.
+  /// Si se guardaron cambios en Configuración, reinicia el reloj con los nuevos tiempos.
   Future<void> _abrirConfiguracion() async {
     final guardado = await Navigator.push<bool>(
       context,
@@ -122,79 +98,55 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
     );
     if (guardado == true) {
       _timer?.cancel();
-      _inicio = null;
       NotificationService.instance.cancelar();
-      await _cargarTiempos(); // incluye setState y reinicia a fase de trabajo
-      if (mounted) setState(() {});
-    }
-  }
-
-  // ------------------------------------------------------- Segundo plano
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _inicio != null) {
-      // Recalcula con el reloj real: el Timer pudo congelarse en background.
-      _sincronizarConRelojReal();
-    }
-  }
-
-  /// Calcula los segundos restantes usando la diferencia de tiempo real
-  /// entre [_inicio] y ahora, en lugar de confiar en los ticks del Timer.
-  void _sincronizarConRelojReal() {
-    if (_inicio == null) return;
-    final transcurridos = DateTime.now().difference(_inicio!).inSeconds;
-    final restantes = _segundosAlIniciar - transcurridos;
-
-    if (restantes <= 0) {
-      setState(() => _segundosRestantes = 0);
-      _finalizarFase();
-    } else {
-      setState(() => _segundosRestantes = restantes);
+      _ciclo.cancelar();
+      await _cargarTiempos();
     }
   }
 
   // ------------------------------------------------------------ Controles
   void _iniciar() {
     if (_corriendo) return;
-    final nuevaSesion = _fase == FasePomodoro.trabajo &&
-        _segundosRestantes == _duracionTrabajo;
-    if (_fase == FasePomodoro.trabajo && _tareaSeleccionadaId == null) {
+    final iniciado = _ciclo.iniciar(
+      tareaId: _tareaSeleccionadaId,
+      ahora: DateTime.now(),
+    );
+    if (!iniciado) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
         content: Text('Selecciona una tarea antes de iniciar'),
       ));
       return;
     }
-    _inicio = DateTime.now();
-    _segundosAlIniciar = _segundosRestantes;
-    if (nuevaSesion) {
-      _inicioSesionTrabajo = _inicio;
-      _tareaSesionId = _tareaSeleccionadaId;
-    }
-    _timer = Timer.periodic(
-      const Duration(seconds: 1),
-      (_) => _sincronizarConRelojReal(),
-    );
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _sincronizar());
     _programarNotificacion();
     setState(() {});
   }
 
-  /// Programa el aviso del SO para cuando termine la fase actual (R-01).
+  /// Actualiza el tiempo restante con el reloj real y detecta el fin de fase.
+  void _sincronizar() {
+    if (_ciclo.sincronizar(DateTime.now())) {
+      _finalizarFase();
+    } else {
+      setState(() {});
+    }
+  }
+
+  /// Programa el aviso del sistema para cuando termine la fase actual.
   void _programarNotificacion() {
-    final esTrabajo = _fase == FasePomodoro.trabajo;
+    final esTrabajo = _ciclo.fase == FasePomodoro.trabajo;
     NotificationService.instance.programarFinDeFase(
-      segundos: _segundosRestantes,
+      segundos: _ciclo.segundosRestantes,
       titulo: 'Tiempo terminado',
       cuerpo: esTrabajo
-          ? 'Completaste un Pomodoro. Descansa ${_duracionDescanso ~/ 60} minutos.'
+          ? 'Completaste un Pomodoro. Descansa ${_ciclo.minutosDescanso} minutos.'
           : 'El descanso terminó. ¡A concentrarse!',
     );
   }
 
   void _pausar() {
     if (!_corriendo) return;
-    _sincronizarConRelojReal();
     _timer?.cancel();
-    _inicio = null;
+    _ciclo.pausar(DateTime.now());
     NotificationService.instance.cancelar();
     setState(() {});
   }
@@ -202,13 +154,8 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
   void _cancelar() {
     _timer?.cancel();
     NotificationService.instance.cancelar();
-    setState(() {
-      _inicio = null;
-      _inicioSesionTrabajo = null;
-      _fase = FasePomodoro.trabajo;
-      _segundosRestantes = _duracionTrabajo;
-      _segundosAlIniciar = _duracionTrabajo;
-    });
+    _ciclo.cancelar();
+    setState(() {});
   }
 
   /// Reproduce el beep de alerta; un fallo de audio nunca debe romper el flujo.
@@ -223,52 +170,31 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
 
   void _finalizarFase() {
     _timer?.cancel();
-    _inicio = null;
     _reproducirBeep();
 
-    if (_fase == FasePomodoro.trabajo) {
-      // ⏱️ El contador llegó a 00:00 → persistir la sesión en SQLite.
-      _guardarSesionLocal();
-      _fase = FasePomodoro.descanso;
-    } else {
-      _fase = FasePomodoro.trabajo;
-    }
+    final sesion = _ciclo.finalizarFase();
+    if (sesion != null) _guardarSesion(sesion);
+    setState(() {});
 
-    setState(() {
-      _segundosRestantes = _duracionFase;
-      _segundosAlIniciar = _duracionFase;
-    });
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(_fase == FasePomodoro.descanso
-            ? '¡Pomodoro completado! Toma un descanso de ${_duracionDescanso ~/ 60} minutos.'
-            : 'Descanso terminado. ¡A trabajar!'),
-      ));
-    }
+    if (!mounted) return;
+    final descanso = _ciclo.fase == FasePomodoro.descanso;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(descanso
+          ? '¡Pomodoro completado! Toma un descanso de ${_ciclo.minutosDescanso} minutos.'
+          : 'Descanso terminado. ¡A trabajar!'),
+    ));
   }
 
-  /// Guarda la sesión de trabajo completada en SQLite (sin bloquear la UI).
-  ///
-  /// `tarea_id` es NOT NULL y tiene FOREIGN KEY (foreign_keys = ON), así que
-  /// no se puede usar null ni un id inexistente: se usa una tarea provisional
-  /// fija ([_tareaProvisionalId]) que se crea si aún no existe.
-  Future<void> _guardarSesionLocal() async {
-    final inicio = _inicioSesionTrabajo;
-    final tareaId = _tareaSesionId;
-    _inicioSesionTrabajo = null;
-    if (inicio == null || tareaId == null) return;
-
+  /// Guarda la sesión de trabajo completada en SQLite.
+  Future<void> _guardarSesion(SesionCompletada sesion) async {
     try {
-      final db = DatabaseHelper.instance;
-      await db.insertarSesion({
+      await DatabaseHelper.instance.insertarSesion({
         'id': const Uuid().v4(),
-        'tarea_id': tareaId,
-        'fecha_inicio': inicio.toUtc().toIso8601String(),
-        'duracion_minutos': _duracionTrabajo ~/ 60,
+        'tarea_id': sesion.tareaId,
+        'fecha_inicio': sesion.inicio.toUtc().toIso8601String(),
+        'duracion_minutos': sesion.minutos,
         'estado': 'completada',
       });
-      debugPrint('Sesión guardada (inicio: $inicio)');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text('Sesión guardada en el historial'),
@@ -281,17 +207,21 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
 
   // ------------------------------------------------------------------- UI
   String get _tiempoFormateado {
-    final m = (_segundosRestantes ~/ 60).toString().padLeft(2, '0');
-    final s = (_segundosRestantes % 60).toString().padLeft(2, '0');
+    final segundos = _ciclo.segundosRestantes;
+    final m = (segundos ~/ 60).toString().padLeft(2, '0');
+    final s = (segundos % 60).toString().padLeft(2, '0');
     return '$m:$s';
+  }
+
+  void _abrir(Widget pantalla) {
+    Navigator.push(context, MaterialPageRoute(builder: (_) => pantalla));
   }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final esTrabajo = _fase == FasePomodoro.trabajo;
+    final esTrabajo = _ciclo.fase == FasePomodoro.trabajo;
     final colorFase = esTrabajo ? scheme.primary : scheme.tertiary;
-    final progreso = 1 - _segundosRestantes / _duracionFase;
 
     return Scaffold(
       appBar: AppBar(
@@ -306,10 +236,17 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
           IconButton(
             icon: const Icon(Icons.bar_chart),
             tooltip: 'Estadísticas',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const StatsScreen()),
-            ),
+            onPressed: () => _abrir(const StatsScreen()),
+          ),
+          IconButton(
+            icon: const Icon(Icons.show_chart),
+            tooltip: 'Gráficas',
+            onPressed: () => _abrir(const GraficasScreen()),
+          ),
+          IconButton(
+            icon: const Icon(Icons.cloud_sync),
+            tooltip: 'Sincronización',
+            onPressed: () => _abrir(const SyncScreen()),
           ),
           IconButton(
             icon: const Icon(Icons.settings),
@@ -345,7 +282,7 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
                     ),
                 ],
                 // Bloqueado mientras el reloj corre o hay una sesión a medias.
-                onChanged: (_corriendo || _inicioSesionTrabajo != null)
+                onChanged: (_corriendo || _ciclo.haySesionEnCurso)
                     ? null
                     : (v) => setState(() => _tareaSeleccionadaId = v),
               ),
@@ -369,7 +306,7 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
               ),
               const SizedBox(height: 16),
               LinearProgressIndicator(
-                value: progreso,
+                value: _ciclo.progreso,
                 minHeight: 8,
                 color: colorFase,
                 borderRadius: BorderRadius.circular(4),
